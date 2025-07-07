@@ -63,26 +63,50 @@ class TMMDashboardChatbot {
     public static function processMessage($user_id, $message) {
         $message = trim(strtolower($message));
         
-        // Enregistrer le message
-        self::saveMessage($user_id, $message, 'user');
+        // Log pour debug
+        error_log("TMM Chatbot processMessage: user_id=$user_id, message='$message'");
         
-        // Détecter l'intention
-        $intent = self::detectIntent($message);
-        
-        // Générer la réponse
-        $response = self::generateResponse($user_id, $intent, $message);
-        
-        // Enregistrer la réponse
-        self::saveMessage($user_id, $response['text'], 'bot', $response);
-        
-        // Analyser le sentiment pour personnaliser
-        $sentiment = self::analyzeSentiment($message);
-        if ($sentiment === 'negative') {
-            $response['text'] .= "\n\n" . self::getRandomResponse('encouragement');
+        try {
+            // Enregistrer le message
+            self::saveMessage($user_id, $message, 'user');
+            
+            // Détecter l'intention
+            $intent = self::detectIntent($message);
+            error_log("TMM Chatbot intent détecté: " . print_r($intent, true));
+            
+            // Générer la réponse
+            $response = self::generateResponse($user_id, $intent, $message);
+            error_log("TMM Chatbot réponse générée: " . print_r($response, true));
+            
+            // Enregistrer la réponse
+            self::saveMessage($user_id, $response['text'], 'bot', $response);
+            
+            // Analyser le sentiment pour personnaliser
+            try {
+                $sentiment = self::analyzeSentiment($message);
+                if ($sentiment === 'negative') {
+                    $response['text'] .= "\n\n" . self::getRandomResponse('encouragement');
+                }
+            } catch (Exception $e) {
+                error_log("TMM Chatbot: Erreur analyse sentiment: " . $e->getMessage());
+                // Continue sans analyse de sentiment
+            }
+            
+            return $response;
+            
+        } catch (Exception $e) {
+            error_log("TMM Chatbot: Erreur dans processMessage: " . $e->getMessage());
+            
+            // Retourner une réponse d'erreur mais fonctionnelle
+            return [
+                'text' => "Je rencontre une difficulté technique. Pouvez-vous reformuler votre question ?",
+                'type' => 'error',
+                'data' => [],
+                'actions' => self::getQuickReplies()
+            ];
         }
-        
-        return $response;
     }
+
     
     /**
      * Détecter l'intention du message
@@ -141,33 +165,45 @@ class TMMDashboardChatbot {
             'type' => 'text'
         ];
         
-        switch ($intent['type']) {
-            case 'command':
-                $method = $intent['method'];
-                $response = self::$method($user_id);
-                break;
-                
-            case 'keyword':
-                $response = self::handleKeywordIntent($user_id, $intent['intent']);
-                break;
-                
-            case 'greeting':
-                $response['text'] = self::getRandomResponse('greeting');
-                $response['actions'] = self::getQuickReplies();
-                break;
-                
-            case 'question':
-                $response = self::handleQuestion($user_id, $original_message);
-                break;
-                
-            default:
-                $response['text'] = self::getRandomResponse('not_understood');
-                $response['actions'] = self::getQuickReplies();
+        try {
+            switch ($intent['type']) {
+                case 'command':
+                    if (method_exists(__CLASS__, $intent['method'])) {
+                        $response = call_user_func([__CLASS__, $intent['method']], $user_id);
+                    } else {
+                        error_log("TMM Chatbot: Méthode {$intent['method']} non trouvée");
+                        $response['text'] = self::getRandomResponse('not_understood');
+                        $response['actions'] = self::getQuickReplies();
+                    }
+                    break;
+                    
+                case 'keyword':
+                    $response = self::handleKeywordIntent($user_id, $intent['intent']);
+                    break;
+                    
+                case 'greeting':
+                    $response['text'] = self::getRandomResponse('greeting');
+                    $response['actions'] = self::getQuickReplies();
+                    break;
+                    
+                case 'question':
+                    $response = self::handleQuestion($user_id, $original_message);
+                    break;
+                    
+                default:
+                    $response['text'] = self::getRandomResponse('not_understood');
+                    $response['actions'] = self::getQuickReplies();
+            }
+            
+        } catch (Exception $e) {
+            error_log("TMM Chatbot: Erreur génération réponse: " . $e->getMessage());
+            $response['text'] = "Je suis désolé, je rencontre une difficulté. Que puis-je faire d'autre pour vous aider ?";
+            $response['actions'] = self::getQuickReplies();
         }
         
         return $response;
     }
-    
+
     /**
      * Afficher l'aide
      */
@@ -192,81 +228,106 @@ class TMMDashboardChatbot {
     /**
      * Afficher les cours
      */
-    private static function showCourses($user_id) {
-        $courses_data = TMMDashboardData::getUserCourses($user_id);
-        $in_progress = $courses_data['in_progress'] ?? [];
-        
-        if (empty($in_progress)) {
+     private static function showCourses($user_id) {
+        try {
+            if (!class_exists('TMMDashboardData')) {
+                return [
+                    'text' => "Je ne peux pas accéder aux informations de cours pour le moment. Rendez-vous dans votre tableau de bord pour voir vos cours.",
+                    'type' => 'text',
+                    'actions' => [
+                        ['label' => 'Aller au tableau de bord', 'value' => 'dashboard']
+                    ]
+                ];
+            }
+    
+            $courses_data = TMMDashboardData::getUserCourses($user_id);
+            $in_progress = $courses_data['in_progress'] ?? [];
+            
+            if (empty($in_progress)) {
+                return [
+                    'text' => "Vous n'avez aucun cours en cours actuellement. Voulez-vous voir les cours recommandés ?",
+                    'type' => 'text',
+                    'actions' => [
+                        ['label' => 'Voir les recommandations', 'value' => 'recommendations'],
+                        ['label' => 'Parcourir tous les cours', 'value' => 'browse_courses']
+                    ]
+                ];
+            }
+            
+            $courses_list = [];
+            foreach (array_slice($in_progress, 0, 3) as $course) {
+                $courses_list[] = [
+                    'title' => $course['name'],
+                    'subtitle' => sprintf('%d%% complété', $course['progress']),
+                    'url' => $course['url'],
+                    'image' => $course['image']
+                ];
+            }
+            
             return [
-                'text' => "Vous n'avez aucun cours en cours actuellement. Voulez-vous voir les cours recommandés ?",
-                'type' => 'text',
+                'text' => sprintf("Vous avez %d cours en progression :", count($in_progress)),
+                'type' => 'cards',
+                'data' => $courses_list,
                 'actions' => [
-                    ['label' => 'Voir les recommandations', 'value' => 'recommendations'],
-                    ['label' => 'Parcourir tous les cours', 'value' => 'browse_courses']
+                    ['label' => 'Voir tous mes cours', 'value' => 'all_courses']
                 ]
             ];
-        }
-        
-        $courses_list = [];
-        foreach (array_slice($in_progress, 0, 3) as $course) {
-            $courses_list[] = [
-                'title' => $course['name'],
-                'subtitle' => sprintf('%d%% complété', $course['progress']),
-                'url' => $course['url'],
-                'image' => $course['image']
+            
+        } catch (Exception $e) {
+            error_log("TMM Chatbot showCourses error: " . $e->getMessage());
+            return [
+                'text' => "Je ne peux pas récupérer vos cours actuellement. Veuillez consulter votre tableau de bord.",
+                'type' => 'text',
+                'actions' => [['label' => 'Tableau de bord', 'value' => 'dashboard']]
             ];
         }
-        
-        return [
-            'text' => sprintf("Vous avez %d cours en progression :", count($in_progress)),
-            'type' => 'cards',
-            'data' => $courses_list,
-            'actions' => [
-                ['label' => 'Voir tous mes cours', 'value' => 'all_courses']
-            ]
-        ];
     }
     
     /**
      * Afficher la progression
      */
     private static function showProgress($user_id) {
-        $dashboard_data = TMMDashboardData::getDashboardData($user_id);
-        $stats = $dashboard_data['stats'];
-        
-        $progress_text = sprintf(
-            "📊 **Votre progression**\n\n" .
-            "✅ Cours terminés : %d\n" .
-            "🔄 En cours : %d\n" .
-            "📚 Non commencés : %d\n" .
-            "📈 Progression globale : %d%%\n" .
-            "🔥 Série actuelle : %d jours",
-            $stats['completed_count'],
-            $stats['in_progress_count'],
-            $stats['enrolled_count'],
-            $stats['completion_percentage'],
-            $stats['learning_streak']
-        );
-        
-        // Ajouter un graphique si possible
-        $chart_data = [
-            'type' => 'progress_chart',
-            'data' => [
-                'completed' => $stats['completed_count'],
-                'in_progress' => $stats['in_progress_count'],
-                'not_started' => $stats['enrolled_count']
-            ]
-        ];
-        
-        return [
-            'text' => $progress_text,
-            'type' => 'mixed',
-            'data' => $chart_data,
-            'actions' => [
-                ['label' => 'Détails par cours', 'value' => 'course_details'],
-                ['label' => 'Statistiques complètes', 'value' => 'full_stats']
-            ]
-        ];
+        try {
+            if (!class_exists('TMMDashboardData')) {
+                return [
+                    'text' => "Les informations de progression ne sont pas disponibles actuellement.",
+                    'type' => 'text'
+                ];
+            }
+    
+            $dashboard_data = TMMDashboardData::getDashboardData($user_id);
+            $stats = $dashboard_data['stats'];
+            
+            $progress_text = sprintf(
+                "📊 **Votre progression**\n\n" .
+                "✅ Cours terminés : %d\n" .
+                "🔄 En cours : %d\n" .
+                "📚 Non commencés : %d\n" .
+                "📈 Progression globale : %d%%\n" .
+                "🔥 Série actuelle : %d jours",
+                $stats['completed_count'],
+                $stats['in_progress_count'],
+                $stats['enrolled_count'],
+                $stats['completion_percentage'],
+                $stats['learning_streak']
+            );
+            
+            return [
+                'text' => $progress_text,
+                'type' => 'text',
+                'actions' => [
+                    ['label' => 'Détails par cours', 'value' => 'course_details'],
+                    ['label' => 'Statistiques complètes', 'value' => 'full_stats']
+                ]
+            ];
+            
+        } catch (Exception $e) {
+            error_log("TMM Chatbot showProgress error: " . $e->getMessage());
+            return [
+                'text' => "Impossible de récupérer votre progression actuellement. Consultez votre tableau de bord pour plus d'informations.",
+                'type' => 'text'
+            ];
+        }
     }
     
     /**
@@ -486,27 +547,9 @@ class TMMDashboardChatbot {
                 ];
                 
             case 'motivation':
-                // Vérifier que la méthode est accessible avant de l'appeler
-        if (class_exists('TMMDashboardBadges') && method_exists('TMMDashboardBadges', 'getUserStats')) {
-            try {
-                $stats = TMMDashboardBadges::getUserStats($user_id);
-            } catch (Exception $e) {
-                // Si erreur, utiliser des valeurs par défaut
-                $stats = [
-                    'completed_courses' => 0,
-                    'learning_streak' => 0,
-                    'recent_activity' => 0
-                ];
-            }
-        } else {
-            // Valeurs par défaut si la classe/méthode n'existe pas
-            $stats = [
-                'completed_courses' => 0,
-                'learning_streak' => 0,
-                'recent_activity' => 0
-            ];
-        }
-                $encouragement = self::getPersonalizedEncouragement($stats);
+                // Version sécurisée qui ne dépend pas de classes externes
+                $encouragement = "🌟 Chaque expert a commencé par être débutant. Votre parcours commence maintenant !\n\n";
+                $encouragement .= self::getRandomResponse('encouragement');
                 
                 return [
                     'text' => $encouragement,
@@ -525,7 +568,7 @@ class TMMDashboardChatbot {
                 ];
         }
     }
-    
+
     /**
      * Gérer les questions
      */
@@ -566,50 +609,44 @@ class TMMDashboardChatbot {
     /**
      * Obtenir des suggestions de réponses rapides
      */
-    public static function getSuggestions($user_id) {
-        $suggestions = [];
-        
-        // Suggestions contextuelles basées sur l'activité de l'utilisateur
-        $dashboard_data = TMMDashboardData::getDashboardData($user_id);
-        
-        // Si des cours sont en progression
-        if (!empty($dashboard_data['courses']['in_progress'])) {
-            $suggestions[] = ['label' => '📚 Continuer mes cours', 'value' => 'courses'];
-        }
-        
-        // Si proche d'un badge
-        // Vérifier que la méthode est accessible avant de l'appeler
-        if (class_exists('TMMDashboardBadges') && method_exists('TMMDashboardBadges', 'getUserStats')) {
-            try {
-                $stats = TMMDashboardBadges::getUserStats($user_id);
-            } catch (Exception $e) {
-                // Si erreur, utiliser des valeurs par défaut
-                $stats = [
-                    'completed_courses' => 0,
-                    'learning_streak' => 0,
-                    'recent_activity' => 0
-                ];
-            }
-        } else {
-            // Valeurs par défaut si la classe/méthode n'existe pas
-            $stats = [
-                'completed_courses' => 0,
-                'learning_streak' => 0,
-                'recent_activity' => 0
-            ];
-        }
-        if ($stats['completed_courses'] == 2) {
-            $suggestions[] = ['label' => '🏆 Comment obtenir le badge Achiever', 'value' => 'badge achiever'];
-        }
-        
-        // Suggestions par défaut
-        $suggestions = array_merge($suggestions, [
+public static function getSuggestions($user_id) {
+    $suggestions = [];
+    
+    try {
+        // Suggestions par défaut qui ne dépendent pas d'autres classes
+        $suggestions = [
+            ['label' => '📚 Mes cours', 'value' => 'cours'],
             ['label' => '📊 Ma progression', 'value' => 'progress'],
+            ['label' => '🏆 Mes badges', 'value' => 'badges'],
             ['label' => '❓ Aide', 'value' => 'help']
-        ]);
+        ];
+
+        // Suggestions contextuelles si les classes sont disponibles
+        if (class_exists('TMMDashboardData')) {
+            try {
+                $dashboard_data = TMMDashboardData::getDashboardData($user_id);
+                
+                // Si des cours sont en progression
+                if (!empty($dashboard_data['courses']['in_progress'])) {
+                    array_unshift($suggestions, ['label' => '📚 Continuer mes cours', 'value' => 'courses']);
+                }
+            } catch (Exception $e) {
+                error_log("TMM Chatbot: Erreur récupération suggestions contextuelles: " . $e->getMessage());
+                // Continue avec suggestions par défaut
+            }
+        }
         
-        return array_slice($suggestions, 0, 4); // Maximum 4 suggestions
+    } catch (Exception $e) {
+        error_log("TMM Chatbot: Erreur génération suggestions: " . $e->getMessage());
+        // Retourner des suggestions de base en cas d'erreur
+        $suggestions = [
+            ['label' => '❓ Aide', 'value' => 'help'],
+            ['label' => '📞 Support', 'value' => 'support']
+        ];
     }
+    
+    return array_slice($suggestions, 0, 4); // Maximum 4 suggestions
+}
     
     /**
      * Obtenir une réponse aléatoire
@@ -694,19 +731,38 @@ class TMMDashboardChatbot {
      * Sauvegarder un message
      */
     private static function saveMessage($user_id, $message, $type, $data = []) {
-        global $wpdb;
-        
-        $wpdb->insert(
-            $wpdb->prefix . 'tmm_chatbot_messages',
-            [
-                'user_id' => $user_id,
-                'message_type' => $type,
-                'message' => $message,
-                'response' => json_encode($data),
-                'created_at' => current_time('mysql')
-            ],
-            ['%d', '%s', '%s', '%s', '%s']
-        );
+        try {
+            global $wpdb;
+            
+            // Vérifier que la table existe
+            $table_name = $wpdb->prefix . 'tmm_chatbot_messages';
+            if ($wpdb->get_var("SHOW TABLES LIKE '$table_name'") !== $table_name) {
+                error_log("TMM Chatbot: Table $table_name n'existe pas");
+                return false;
+            }
+            
+            $result = $wpdb->insert(
+                $table_name,
+                [
+                    'user_id' => $user_id,
+                    'message_type' => $type,
+                    'message' => $message,
+                    'response' => json_encode($data),
+                    'created_at' => current_time('mysql')
+                ],
+                ['%d', '%s', '%s', '%s', '%s']
+            );
+            
+            if ($result === false) {
+                error_log("TMM Chatbot: Erreur sauvegarde message: " . $wpdb->last_error);
+            }
+            
+            return $result !== false;
+            
+        } catch (Exception $e) {
+            error_log("TMM Chatbot: Exception sauvegarde message: " . $e->getMessage());
+            return false;
+        }
     }
     
     /**
