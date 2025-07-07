@@ -153,6 +153,9 @@ class TMMDashboardBadges {
         // Vitesse de complétion
         $completion_speed = self::getCompletionSpeed($user_id);
         
+        // Points totaux
+        $total_points = get_user_meta($user_id, 'tmm_total_points', true) ?: 0;
+        
         return [
             'user_id' => $user_id,
             'recent_activity' => $recent_activity,
@@ -168,17 +171,53 @@ class TMMDashboardBadges {
             'completion_speed' => $completion_speed,
             'total_time_spent' => self::getTotalTimeSpent($user_id),
             'certificates_earned' => self::getUserCertificatesCount($user_id),
-            'points' => self::getUserPoints($user_id)
+            'points' => self::getUserPoints($user_id),
+            'total_points' => intval($total_points),
+            // Nouvelles statistiques
+            'current_level' => self::getUserLevel($completed_courses),
+            'progress_to_next_badge' => self::getProgressToNextBadge($user_id),
+            'last_badge_earned' => self::getLastBadgeEarned($user_id),
+            'weekly_activity' => self::getWeeklyActivityStats($user_id),
+            'performance_trend' => self::getPerformanceTrend($user_id),
+            'badges_earned' => count(get_user_meta($user_id, 'tmm_earned_badges', true) ?: [])
         ];
     }
 
     /**
      * Calculer la série d'apprentissage (jours consécutifs)
      */
-   private static function calculateLearningStreak($user_id) {
-    global $wpdb;
-    
-        // Récupérer les dates d'activité distinctes des 60 derniers jours
+    private static function calculateLearningStreak($user_id) {
+        global $wpdb;
+        
+        // Vérifier d'abord la table analytics si elle existe
+        $analytics_table_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}tmm_analytics'");
+        if ($analytics_table_exists) {
+            $streak = 0;
+            $current_date = current_time('Y-m-d');
+            
+            // Vérifier jour par jour en remontant
+            for ($i = 0; $i < 365; $i++) {
+                $check_date = date('Y-m-d', strtotime("-{$i} days", strtotime($current_date)));
+                
+                $activity = $wpdb->get_var($wpdb->prepare(
+                    "SELECT COUNT(*) FROM {$wpdb->prefix}tmm_analytics
+                     WHERE user_id = %d 
+                     AND DATE(created_at) = %s
+                     AND event_type IN ('lesson_completed', 'quiz_completed', 'course_progress')",
+                    $user_id, $check_date
+                ));
+                
+                if (intval($activity) > 0) {
+                    $streak++;
+                } else if ($i > 0) { // Pas d'activité et ce n'est pas aujourd'hui
+                    break;
+                }
+            }
+            
+            return $streak;
+        }
+        
+        // Fallback sur learnpress_user_items
         $activities = $wpdb->get_col($wpdb->prepare(
             "SELECT DISTINCT DATE(GREATEST(
                 COALESCE(start_time, '1970-01-01'),
@@ -223,6 +262,7 @@ class TMMDashboardBadges {
         
         return $streak;
     }
+
     /**
      * Obtenir le nombre de certificats de l'utilisateur
      */
@@ -385,6 +425,31 @@ class TMMDashboardBadges {
              ) >= %s",
             $user_id, $since
         ));
+    }
+
+    /**
+     * Obtenir le score d'activité récente
+     */
+    private static function getRecentActivityScore($user_id) {
+        global $wpdb;
+        
+        // Utiliser d'abord la table analytics si elle existe
+        $table_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}tmm_analytics'");
+        if ($table_exists) {
+            // Compter les activités des 7 derniers jours
+            $activity_count = $wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM {$wpdb->prefix}tmm_analytics
+                 WHERE user_id = %d 
+                 AND created_at > DATE_SUB(NOW(), INTERVAL 7 DAY)
+                 AND event_type IN ('lesson_completed', 'quiz_completed', 'course_started', 'course_completed')",
+                $user_id
+            ));
+            
+            return intval($activity_count);
+        }
+        
+        // Fallback sur la méthode existante getRecentActivityCount
+        return self::getRecentActivityCount($user_id, 7);
     }
 
     /**
@@ -590,6 +655,197 @@ class TMMDashboardBadges {
     }
 
     /**
+     * Déterminer le niveau de l'utilisateur
+     */
+    private static function getUserLevel($completed_courses) {
+        if ($completed_courses >= 10) return 'expert';
+        if ($completed_courses >= 5) return 'advanced';
+        if ($completed_courses >= 3) return 'intermediate';
+        if ($completed_courses >= 1) return 'beginner';
+        return 'newcomer';
+    }
+
+    /**
+     * Calculer la progression vers le prochain badge
+     */
+    private static function getProgressToNextBadge($user_id) {
+        $current_badge = get_user_meta($user_id, 'tmm_badge_status', true) ?: 'curieux';
+        
+        // Utiliser le nombre de cours complétés
+        $completed_courses = self::getCompletedCoursesCount($user_id);
+        
+        // Logique pour déterminer le prochain badge
+        $badge_requirements = [
+            'absent' => ['target' => 'curieux', 'requirement' => 1, 'current' => 0, 'type' => 'activity'],
+            'curieux' => ['target' => 'explorateur', 'requirement' => 1, 'current' => $completed_courses, 'type' => 'courses'],
+            'explorateur' => ['target' => 'achiever', 'requirement' => 3, 'current' => $completed_courses, 'type' => 'courses'],
+            'achiever' => ['target' => 'mentor', 'requirement' => 5, 'current' => $completed_courses, 'type' => 'courses'],
+            'mentor' => ['target' => 'champion', 'requirement' => 10, 'current' => $completed_courses, 'type' => 'courses']
+        ];
+        
+        if (!isset($badge_requirements[$current_badge])) {
+            return ['progress' => 100, 'next_badge' => 'none', 'requirement' => 0];
+        }
+        
+        $next_badge_info = $badge_requirements[$current_badge];
+        $progress = min(100, ($next_badge_info['current'] / $next_badge_info['requirement']) * 100);
+        
+        return [
+            'progress' => round($progress),
+            'next_badge' => $next_badge_info['target'],
+            'requirement' => $next_badge_info['requirement'],
+            'current' => $next_badge_info['current'],
+            'remaining' => max(0, $next_badge_info['requirement'] - $next_badge_info['current'])
+        ];
+    }
+
+    /**
+     * Obtenir le dernier badge gagné
+     */
+    private static function getLastBadgeEarned($user_id) {
+        global $wpdb;
+        
+        // Vérifier que la table badges existe
+        $table_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}tmm_user_badges'");
+        if (!$table_exists) {
+            // Fallback sur les meta utilisateur
+            $earned_badges = get_user_meta($user_id, 'tmm_earned_badges', true) ?: [];
+            if (!empty($earned_badges)) {
+                $last_badge = end($earned_badges);
+                return [
+                    'badge' => $last_badge,
+                    'date' => null,
+                    'time_ago' => 'récemment'
+                ];
+            }
+            return null;
+        }
+        
+        $last_badge = $wpdb->get_row($wpdb->prepare(
+            "SELECT badge_type, earned_date 
+             FROM {$wpdb->prefix}tmm_user_badges
+             WHERE user_id = %d
+             ORDER BY earned_date DESC
+             LIMIT 1",
+            $user_id
+        ));
+        
+        if (!$last_badge) {
+            return null;
+        }
+        
+        return [
+            'badge' => $last_badge->badge_type,
+            'date' => $last_badge->earned_date,
+            'time_ago' => human_time_diff(strtotime($last_badge->earned_date), current_time('timestamp'))
+        ];
+    }
+
+    /**
+     * Obtenir les statistiques d'activité hebdomadaire
+     */
+    private static function getWeeklyActivityStats($user_id) {
+        global $wpdb;
+        
+        $table_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}tmm_analytics'");
+        if (!$table_exists) {
+            return ['this_week' => 0, 'last_week' => 0, 'trend' => 'stable'];
+        }
+        
+        // Activité de cette semaine
+        $this_week = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$wpdb->prefix}tmm_analytics
+             WHERE user_id = %d 
+             AND created_at >= DATE_SUB(NOW(), INTERVAL WEEKDAY(NOW()) DAY)
+             AND event_type IN ('lesson_completed', 'quiz_completed')",
+            $user_id
+        ));
+        
+        // Activité de la semaine dernière
+        $last_week = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$wpdb->prefix}tmm_analytics
+             WHERE user_id = %d 
+             AND created_at >= DATE_SUB(DATE_SUB(NOW(), INTERVAL WEEKDAY(NOW()) DAY), INTERVAL 7 DAY)
+             AND created_at < DATE_SUB(NOW(), INTERVAL WEEKDAY(NOW()) DAY)
+             AND event_type IN ('lesson_completed', 'quiz_completed')",
+            $user_id
+        ));
+        
+        // Déterminer la tendance
+        $trend = 'stable';
+        if ($this_week > $last_week) {
+            $trend = 'up';
+        } elseif ($this_week < $last_week) {
+            $trend = 'down';
+        }
+        
+        return [
+            'this_week' => intval($this_week),
+            'last_week' => intval($last_week),
+            'trend' => $trend,
+            'change' => $this_week - $last_week
+        ];
+    }
+
+    /**
+     * Obtenir la tendance de performance
+     */
+    private static function getPerformanceTrend($user_id) {
+        global $wpdb;
+        
+        $table_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}tmm_analytics'");
+        if (!$table_exists) {
+            // Fallback sur les stats de quiz existantes
+            $quiz_stats = self::getQuizStats($user_id);
+            return [
+                'trend' => 'stable',
+                'average_score' => $quiz_stats['average_score']
+            ];
+        }
+        
+        // Scores des quiz récents (30 derniers jours)
+        $recent_scores = $wpdb->get_col($wpdb->prepare(
+            "SELECT JSON_EXTRACT(event_data, '$.score')
+             FROM {$wpdb->prefix}tmm_analytics
+             WHERE user_id = %d 
+             AND event_type = 'quiz_completed'
+             AND created_at > DATE_SUB(NOW(), INTERVAL 30 DAY)
+             ORDER BY created_at DESC
+             LIMIT 10",
+            $user_id
+        ));
+        
+        if (empty($recent_scores)) {
+            return ['trend' => 'no_data', 'average_score' => 0];
+        }
+        
+        $recent_scores = array_map('intval', $recent_scores);
+        $average_score = array_sum($recent_scores) / count($recent_scores);
+        
+        // Calculer la tendance
+        $trend = 'stable';
+        if (count($recent_scores) >= 3) {
+            $first_half = array_slice($recent_scores, 0, ceil(count($recent_scores) / 2));
+            $second_half = array_slice($recent_scores, floor(count($recent_scores) / 2));
+            
+            $first_avg = array_sum($first_half) / count($first_half);
+            $second_avg = array_sum($second_half) / count($second_half);
+            
+            if ($second_avg > $first_avg + 5) {
+                $trend = 'improving';
+            } elseif ($second_avg < $first_avg - 5) {
+                $trend = 'declining';
+            }
+        }
+        
+        return [
+            'trend' => $trend,
+            'average_score' => round($average_score, 1),
+            'recent_scores' => $recent_scores
+        ];
+    }
+
+    /**
      * Notifier un nouveau badge
      */
     private static function notifyNewBadge($user_id, $badge_type) {
@@ -649,34 +905,51 @@ class TMMDashboardBadges {
      * Mettre à jour les statistiques utilisateur
      */
     public static function updateUserStats($user_id) {
-        $now = current_time('mysql');
-        update_user_meta($user_id, 'last_login', $now);
-
-        // Incrémenter le compteur de connexions du mois
-        $current_month = date('Y-m');
-        $last_month = get_user_meta($user_id, 'last_login_month', true);
-
-        if ($last_month !== $current_month) {
-            update_user_meta($user_id, 'last_login_month', $current_month);
-            update_user_meta($user_id, 'monthly_login_count', 1);
-            
-            $months_active = (int) get_user_meta($user_id, 'active_months', true);
-            update_user_meta($user_id, 'active_months', $months_active + 1);
-        } else {
-            $count = (int) get_user_meta($user_id, 'monthly_login_count', true);
-            update_user_meta($user_id, 'monthly_login_count', $count + 1);
+        if (!$user_id) {
+            return false;
         }
+        
+        try {
+            $now = current_time('mysql');
+            update_user_meta($user_id, 'last_login', $now);
 
-        // Mettre à jour le compteur d'activités récentes
-        $recent_activity = self::getRecentActivityCount($user_id);
-        update_user_meta($user_id, 'tmm_recent_activity_count', $recent_activity);
+            // Incrémenter le compteur de connexions du mois
+            $current_month = date('Y-m');
+            $last_month = get_user_meta($user_id, 'last_login_month', true);
 
-        // Mettre à jour le compteur de cours terminés
-        $completed_courses = self::getCompletedCoursesCount($user_id);
-        update_user_meta($user_id, 'tmm_completed_courses_count', $completed_courses);
+            if ($last_month !== $current_month) {
+                update_user_meta($user_id, 'last_login_month', $current_month);
+                update_user_meta($user_id, 'monthly_login_count', 1);
+                
+                $months_active = (int) get_user_meta($user_id, 'active_months', true);
+                update_user_meta($user_id, 'active_months', $months_active + 1);
+            } else {
+                $count = (int) get_user_meta($user_id, 'monthly_login_count', true);
+                update_user_meta($user_id, 'monthly_login_count', $count + 1);
+            }
 
-        // Vérifier les badges
-        self::updateBadgeStatus($user_id);
+            // Mettre à jour le compteur d'activités récentes
+            $recent_activity = self::getRecentActivityCount($user_id);
+            update_user_meta($user_id, 'tmm_recent_activity_count', $recent_activity);
+
+            // Mettre à jour le compteur de cours terminés
+            $completed_courses = self::getCompletedCoursesCount($user_id);
+            update_user_meta($user_id, 'tmm_completed_courses_count', $completed_courses);
+            
+            // Mettre à jour les points totaux (sans appel récursif !)
+            $learning_streak = self::calculateLearningStreak($user_id);
+            $total_points = $completed_courses * 100 + $learning_streak * 10;
+            update_user_meta($user_id, 'tmm_total_points', $total_points);
+
+            // Vérifier les badges
+            self::updateBadgeStatus($user_id);
+            
+            return true;
+            
+        } catch (Exception $e) {
+            error_log('TMM Badge Stats Update Error: ' . $e->getMessage());
+            return false;
+        }
     }
 
     /**
